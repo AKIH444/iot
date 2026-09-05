@@ -1,16 +1,12 @@
 {
-  "name": "esp32-image-upload",
+  "name": "esp32-youtube-relay",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Relay ESP32-CAM MJPEG to YouTube RTMP",
+  "main": "server.js",
   "scripts": {
-    "start": "node proxy.js"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "express": "^4.21.2",
     "ws": "^8.18.0"
   }
 }
