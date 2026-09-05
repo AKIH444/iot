@@ -1,65 +1,176 @@
-const WebSocket = require('ws');
-const { spawn } = require('child_process');
-const fs = require('fs');
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
 
-const PORT = process.env.PORT || 8080;
-const RTMP_URL = process.env.RTMP_URL; // e.g., rtmp://a.rtmp.youtube.com/live2/your-key
+const app = express();
+const server = http.createServer(app);
 
-if (!RTMP_URL) {
-  console.error('RTMP_URL environment variable is required');
-  process.exit(1);
-}
+const PORT = process.env.PORT || 10000;
 
-const wss = new WebSocket.Server({ port: PORT });
-console.log(`WebSocket server listening on port ${PORT}`);
+// ----------------------------------------------------
+// HTTP server
+// ----------------------------------------------------
 
-let ffmpeg = null;
-let frameCount = 0;
-
-function startFFmpeg() {
-  const args = [
-    '-f', 'image2pipe',
-    '-vcodec', 'mjpeg',
-    '-i', '-',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-pix_fmt', 'yuv420p',
-    '-f', 'flv',
-    RTMP_URL
-  ];
-
-  ffmpeg = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  ffmpeg.stdin.on('error', (err) => console.error('FFmpeg stdin error:', err));
-  ffmpeg.stderr.on('data', (data) => {
-    // Log only if verbose
-    if (process.env.DEBUG) console.error(`FFmpeg: ${data}`);
-  });
-  ffmpeg.on('close', (code) => {
-    console.log(`FFmpeg process exited with code ${code}`);
-    ffmpeg = null;
-  });
-}
-
-wss.on('connection', (ws) => {
-  console.log('ESP32 connected');
-  if (!ffmpeg) startFFmpeg();
-
-  ws.on('message', (data) => {
-    if (ffmpeg && ffmpeg.stdin.writable) {
-      ffmpeg.stdin.write(data);
-      frameCount++;
-      if (frameCount % 100 === 0) console.log(`Frames processed: ${frameCount}`);
-    }
-  });
-
-  ws.on('close', () => {
-    console.log('ESP32 disconnected');
-  });
+app.get("/", (req, res) => {
+    res.send(`
+        <html>
+        <head>
+            <title>ESP32 Camera Server</title>
+        </head>
+        <body>
+            <h1>ESP32 Camera Server</h1>
+            <p>Server is running.</p>
+            <p>Camera stream: <a href="/stream">/stream</a></p>
+        </body>
+        </html>
+    `);
 });
 
-// Keep FFmpeg alive even if no connection (optional)
+app.get("/health", (req, res) => {
+    res.json({
+        status: "ok",
+        cameraConnected: cameraSocket !== null
+    });
+});
+
+// ----------------------------------------------------
+// MJPEG stream
+// ----------------------------------------------------
+
+let latestFrame = null;
+
+const viewers = new Set();
+
+app.get("/stream", (req, res) => {
+
+    console.log("Viewer connected");
+
+    res.writeHead(200, {
+        "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Connection": "close",
+        "Access-Control-Allow-Origin": "*"
+    });
+
+    viewers.add(res);
+
+    // Send current frame immediately
+    if (latestFrame) {
+        sendFrame(res, latestFrame);
+    }
+
+    req.on("close", () => {
+        console.log("Viewer disconnected");
+        viewers.delete(res);
+    });
+});
+
+function sendFrame(res, frame) {
+
+    try {
+
+        res.write(
+            "--frame\r\n" +
+            "Content-Type: image/jpeg\r\n" +
+            "Content-Length: " + frame.length + "\r\n\r\n"
+        );
+
+        res.write(frame);
+
+        res.write("\r\n");
+
+    } catch (error) {
+        viewers.delete(res);
+    }
+}
+
+// ----------------------------------------------------
+// WebSocket server
+// ----------------------------------------------------
+
+const wss = new WebSocket.Server({
+    server: server,
+    path: "/ws"
+});
+
+let cameraSocket = null;
+
+wss.on("connection", (ws, req) => {
+
+    console.log("WebSocket connection");
+
+    // Only allow one camera
+    if (cameraSocket !== null) {
+
+        console.log("Camera already connected");
+
+        ws.close(1013, "Camera already connected");
+
+        return;
+    }
+
+    cameraSocket = ws;
+
+    console.log("ESP32-CAM connected");
+
+    ws.on("message", (data, isBinary) => {
+
+        if (!isBinary) {
+            console.log("Text message:", data.toString());
+            return;
+        }
+
+        // JPEG frame received
+        latestFrame = Buffer.from(data);
+
+        // Send frame to every browser
+        for (const viewer of viewers) {
+            sendFrame(viewer, latestFrame);
+        }
+    });
+
+    ws.on("close", () => {
+
+        console.log("ESP32-CAM disconnected");
+
+        if (cameraSocket === ws) {
+            cameraSocket = null;
+        }
+    });
+
+    ws.on("error", (error) => {
+
+        console.log("WebSocket error:", error);
+
+        if (cameraSocket === ws) {
+            cameraSocket = null;
+        }
+    });
+});
+
+// ----------------------------------------------------
+// WebSocket heartbeat
+// ----------------------------------------------------
+
 setInterval(() => {
-  if (!ffmpeg) startFFmpeg();
-}, 5000);
+
+    wss.clients.forEach((ws) => {
+
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+        }
+
+    });
+
+}, 30000);
+
+// ----------------------------------------------------
+// Start server
+// ----------------------------------------------------
+
+server.listen(PORT, "0.0.0.0", () => {
+
+    console.log(`Server running on port ${PORT}`);
+
+});
