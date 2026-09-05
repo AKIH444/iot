@@ -1,3 +1,5 @@
+
+
 FROM node:20-slim
 
 WORKDIR /app
@@ -5,6 +7,7 @@ WORKDIR /app
 COPY package*.json ./
 
 RUN npm install
+RUN npm install express ws cors
 
 COPY server.js .
 
