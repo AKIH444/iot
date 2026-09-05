@@ -1,12 +1,13 @@
 {
-  "name": "esp32-youtube-relay",
+  "name": "esp32-camera-server",
   "version": "1.0.0",
-  "description": "Relay ESP32-CAM MJPEG to YouTube RTMP",
+  "description": "ESP32-CAM WebSocket to MJPEG streaming server",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "express": "^5.1.0",
+    "ws": "^8.18.3"
   }
 }
