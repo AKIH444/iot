@@ -1,65 +1,87 @@
 const WebSocket = require('ws');
 const { spawn } = require('child_process');
+const path = require('path');
 const fs = require('fs');
 
-const PORT = process.env.PORT || 8080;
-const RTMP_URL = process.env.RTMP_URL; // e.g., rtmp://a.rtmp.youtube.com/live2/your-key
+/**
+ * Example websocket client connection from esp32:
+ * void send_frame(camera_fb_t *fb)
+ * {
+ *   if (esp_websocket_client_is_connected(client))
+ *   {
+ *     esp_websocket_client_send_bin(client, (const char *)fb->buf, fb->len, portMAX_DELAY);
+ *   }
+ * }
+ */
 
-if (!RTMP_URL) {
-  console.error('RTMP_URL environment variable is required');
-  process.exit(1);
-}
+const rtmpFile = path.join(__dirname, 'rtmp.url');
 
-const wss = new WebSocket.Server({ port: PORT });
-console.log(`WebSocket server listening on port ${PORT}`);
+const wss = new WebSocket.Server({ port: 8080,  });
 
-let ffmpeg = null;
-let frameCount = 0;
-
-function startFFmpeg() {
-  const args = [
-    '-f', 'image2pipe',
-    '-vcodec', 'mjpeg',
-    '-i', '-',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-pix_fmt', 'yuv420p',
-    '-f', 'flv',
-    RTMP_URL
-  ];
-
-  ffmpeg = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
-
-  ffmpeg.stdin.on('error', (err) => console.error('FFmpeg stdin error:', err));
-  ffmpeg.stderr.on('data', (data) => {
-    // Log only if verbose
-    if (process.env.DEBUG) console.error(`FFmpeg: ${data}`);
-  });
-  ffmpeg.on('close', (code) => {
-    console.log(`FFmpeg process exited with code ${code}`);
-    ffmpeg = null;
-  });
-}
+let currentConnection = null;
+let lastFrame = null;
+const fps = 30;
+const interval = 1000 / fps;
 
 wss.on('connection', (ws) => {
-  console.log('ESP32 connected');
-  if (!ffmpeg) startFFmpeg();
+  if (currentConnection) {
+    ws.write('Another client is already connected');
+    ws.close();
+    return;
+  }
 
-  ws.on('message', (data) => {
-    if (ffmpeg && ffmpeg.stdin.writable) {
-      ffmpeg.stdin.write(data);
-      frameCount++;
-      if (frameCount % 100 === 0) console.log(`Frames processed: ${frameCount}`);
-    }
+  currentConnection = ws;
+
+  console.log('Client connected');
+
+  if (!fs.existsSync(rtmpFile)) {
+    console.error('RTMP URL file not found');
+    ws.close();
+    return;
+  }
+
+  const rtmpUrl = (fs.readFileSync(rtmpFile) + "").trim();
+  console.log(`RTMP URL: ${rtmpUrl}`);
+
+  const ffmpeg = spawn('ffmpeg', [
+    '-re',
+    '-i', '-',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-maxrate', '3000k',
+    '-bufsize', '6000k',
+    '-pix_fmt', 'yuv420p',
+    '-g', '50',
+    '-f', 'flv',
+    rtmpUrl
+  ]);
+
+  ws.on('message', (message) => {
+    lastFrame = message;
+    process.stdout.clearLine(0);
+    process.stdout.cursorTo(0);
+    process.stdout.write(`Frame size: ${message.length} bytes, at: ${new Date().toISOString()}`);
   });
 
+  const intervalId = setInterval(() => {
+    if (lastFrame) {
+      ffmpeg.stdin.write(lastFrame);
+    }
+  }, interval);
+
   ws.on('close', () => {
-    console.log('ESP32 disconnected');
+    console.log('Client disconnected');
+    ffmpeg?.stdin.end();
+    currentConnection = null;
+    clearInterval(intervalId);
+  });
+
+  ws.on('error', (err) => {
+    console.error(err);
+    ffmpeg?.stdin.end();
+    currentConnection = null;
+    clearInterval(intervalId);
   });
 });
 
-// Keep FFmpeg alive even if no connection (optional)
-setInterval(() => {
-  if (!ffmpeg) startFFmpeg();
-}, 5000);
+console.log('WebSocket server started on port 8080');
