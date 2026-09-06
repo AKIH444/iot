@@ -1,16 +1,15 @@
-
-
-FROM node:20-slim
+FROM node:20-alpine
 
 WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm install
-RUN npm install express ws cors
+RUN npm install --omit=dev
 
-COPY server.js .
+COPY server.js ./
+
+ENV NODE_ENV=production
 
 EXPOSE 10000
 
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
