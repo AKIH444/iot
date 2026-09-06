@@ -12,155 +12,181 @@ let cameraSocket = null;
 let latestFrame = null;
 let cameraStatus = {};
 let cameraConnectedAt = null;
+
 const viewers = new Set();
+const pendingRegisters = new Map();
 
 /* =========================
-   WEB UI
+   UI
 ========================= */
 
 app.get("/", (req, res) => {
-  res.send(`<!DOCTYPE html>
+res.send(`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ESP32-CAM Control</title>
+<title>ESP32-CAM</title>
 
 <style>
 *{box-sizing:border-box}
+
 body{
-  margin:0;
-  font-family:Arial,sans-serif;
-  background:#0b1020;
-  color:#fff;
+margin:0;
+font-family:Arial,sans-serif;
+background:#080d18;
+color:white;
 }
+
 header{
-  padding:20px 25px;
-  background:#111936;
-  border-bottom:1px solid #263154;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
+padding:18px 25px;
+background:#111827;
+border-bottom:1px solid #263247;
+display:flex;
+justify-content:space-between;
+align-items:center;
 }
-h1{margin:0;font-size:22px}
+
+h1{
+margin:0;
+font-size:22px;
+}
+
 .status{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  font-size:14px;
+display:flex;
+align-items:center;
+gap:8px;
 }
+
 .dot{
-  width:10px;
-  height:10px;
-  border-radius:50%;
-  background:#ef4444;
+width:10px;
+height:10px;
+border-radius:50%;
+background:#ef4444;
 }
-.dot.online{background:#22c55e}
+
+.dot.online{
+background:#22c55e;
+}
 
 .container{
-  max-width:1200px;
-  margin:auto;
-  padding:20px;
+max-width:1200px;
+margin:auto;
+padding:20px;
 }
 
 .grid{
-  display:grid;
-  grid-template-columns:2fr 1fr;
-  gap:20px;
+display:grid;
+grid-template-columns:2fr 1fr;
+gap:20px;
 }
 
 .card{
-  background:#111936;
-  border:1px solid #263154;
-  border-radius:14px;
-  padding:18px;
-  box-shadow:0 8px 30px #0004;
+background:#111827;
+border:1px solid #263247;
+border-radius:14px;
+padding:18px;
 }
 
 .card h2{
-  margin-top:0;
-  font-size:17px;
+font-size:17px;
+margin-top:0;
 }
 
-.video{
-  width:100%;
-  background:#000;
-  border-radius:10px;
-  display:block;
-  min-height:300px;
-  object-fit:contain;
+.camera{
+width:100%;
+background:#000;
+border-radius:10px;
+display:block;
+min-height:300px;
+object-fit:contain;
 }
-
-.controls{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:12px;
-}
-
-.control{
-  background:#182142;
-  padding:12px;
-  border-radius:10px;
-}
-
-label{
-  display:block;
-  font-size:13px;
-  color:#aab4d0;
-  margin-bottom:8px;
-}
-
-input,select,button{
-  width:100%;
-  padding:9px;
-  border:0;
-  border-radius:7px;
-  background:#0c1329;
-  color:#fff;
-}
-
-input[type=range]{padding:0}
-
-button{
-  background:#2563eb;
-  cursor:pointer;
-  font-weight:bold;
-}
-
-button:hover{background:#3b82f6}
-
-.full{grid-column:1/-1}
 
 .stats{
-  display:grid;
-  grid-template-columns:repeat(3,1fr);
-  gap:10px;
+display:grid;
+grid-template-columns:1fr 1fr;
+gap:10px;
 }
 
 .stat{
-  background:#182142;
-  padding:14px;
-  border-radius:10px;
+background:#1b2538;
+padding:14px;
+border-radius:10px;
 }
-.stat small{color:#8d99bb}
+
+.stat small{
+color:#94a3b8;
+}
+
 .stat strong{
-  display:block;
-  font-size:18px;
-  margin-top:5px;
+display:block;
+font-size:18px;
+margin-top:5px;
+}
+
+.controls{
+display:grid;
+grid-template-columns:1fr 1fr;
+gap:12px;
+}
+
+.control{
+background:#1b2538;
+padding:12px;
+border-radius:10px;
+}
+
+label{
+display:block;
+font-size:13px;
+color:#94a3b8;
+margin-bottom:8px;
+}
+
+input,select,button{
+width:100%;
+padding:9px;
+border:0;
+border-radius:7px;
+background:#0b1220;
+color:white;
+}
+
+input[type=range]{
+padding:0;
+}
+
+button{
+background:#2563eb;
+cursor:pointer;
+font-weight:bold;
+}
+
+button:hover{
+background:#3b82f6;
+}
+
+.full{
+grid-column:1/-1;
 }
 
 pre{
-  background:#080d1d;
-  padding:12px;
-  border-radius:8px;
-  overflow:auto;
-  max-height:250px;
-  font-size:12px;
+background:#050912;
+padding:12px;
+border-radius:8px;
+overflow:auto;
+max-height:250px;
+font-size:12px;
 }
 
 @media(max-width:800px){
-  .grid{grid-template-columns:1fr}
-  .controls{grid-template-columns:1fr}
+.grid{
+grid-template-columns:1fr;
+}
+
+.controls{
+grid-template-columns:1fr;
+}
 }
 </style>
 </head>
@@ -168,11 +194,12 @@ pre{
 <body>
 
 <header>
-  <h1>📷 ESP32-CAM Control</h1>
-  <div class="status">
-    <span id="dot" class="dot"></span>
-    <span id="connection">Camera Offline</span>
-  </div>
+<h1>📷 ESP32-CAM Control</h1>
+
+<div class="status">
+<span id="dot" class="dot"></span>
+<span id="connection">Camera Offline</span>
+</div>
 </header>
 
 <div class="container">
@@ -180,35 +207,55 @@ pre{
 <div class="grid">
 
 <div class="card">
-  <h2>Live Camera</h2>
-  <img id="stream" class="video" src="/stream">
+
+<h2>Live Camera</h2>
+
+<img
+id="stream"
+class="camera"
+src="/stream"
+alt="Waiting for camera..."
+>
+
 </div>
 
 <div class="card">
-  <h2>Camera Status</h2>
 
-  <div class="stats">
-    <div class="stat">
-      <small>Connection</small>
-      <strong id="camState">Offline</strong>
-    </div>
+<h2>Camera Status</h2>
 
-    <div class="stat">
-      <small>Viewers</small>
-      <strong id="viewerCount">0</strong>
-    </div>
+<div class="stats">
 
-    <div class="stat">
-      <small>Frames</small>
-      <strong id="frameSize">0 KB</strong>
-    </div>
-  </div>
-
-  <br>
-  <button onclick="capture()">📸 Capture</button>
+<div class="stat">
+<small>Camera</small>
+<strong id="camState">Offline</strong>
 </div>
 
+<div class="stat">
+<small>Viewers</small>
+<strong id="viewerCount">0</strong>
+</div>
+
+<div class="stat">
+<small>Frame</small>
+<strong id="frameSize">0 KB</strong>
+</div>
+
+<div class="stat">
+<small>FPS</small>
+<strong id="fps">~10</strong>
+</div>
+
+</div>
+
+<br>
+
+<button onclick="capture()">📸 Capture Picture</button>
+
+</div>
+
+
 <div class="card">
+
 <h2>Image Settings</h2>
 
 <div class="controls">
@@ -217,7 +264,7 @@ pre{
 <label>Frame Size</label>
 <select onchange="control('framesize',this.value)">
 <option value="10">QQVGA</option>
-<option value="8">QVGA</option>
+<option value="8" selected>QVGA</option>
 <option value="6">VGA</option>
 <option value="5">SVGA</option>
 <option value="4">XGA</option>
@@ -229,65 +276,31 @@ pre{
 <div class="control">
 <label>JPEG Quality</label>
 <input type="range" min="10" max="63" value="12"
-oninput="qualityValue.innerText=this.value"
 onchange="control('quality',this.value)">
-<span id="qualityValue">12</span>
 </div>
 
 <div class="control">
 <label>Brightness</label>
 <input type="range" min="-2" max="2" value="0"
-oninput="brightnessValue.innerText=this.value"
 onchange="control('brightness',this.value)">
-<span id="brightnessValue">0</span>
 </div>
 
 <div class="control">
 <label>Contrast</label>
 <input type="range" min="-2" max="2" value="0"
-oninput="contrastValue.innerText=this.value"
 onchange="control('contrast',this.value)">
-<span id="contrastValue">0</span>
 </div>
 
 <div class="control">
 <label>Saturation</label>
 <input type="range" min="-2" max="2" value="0"
-oninput="saturationValue.innerText=this.value"
 onchange="control('saturation',this.value)">
-<span id="saturationValue">0</span>
 </div>
 
 <div class="control">
 <label>Sharpness</label>
 <input type="range" min="-2" max="2" value="0"
-oninput="sharpnessValue.innerText=this.value"
 onchange="control('sharpness',this.value)">
-<span id="sharpnessValue">0</span>
-</div>
-
-<div class="control">
-<label>Special Effect</label>
-<select onchange="control('special_effect',this.value)">
-<option value="0">None</option>
-<option value="1">Negative</option>
-<option value="2">Grayscale</option>
-<option value="3">Red Tint</option>
-<option value="4">Green Tint</option>
-<option value="5">Blue Tint</option>
-<option value="6">Sepia</option>
-</select>
-</div>
-
-<div class="control">
-<label>White Balance</label>
-<select onchange="control('wb_mode',this.value)">
-<option value="0">Auto</option>
-<option value="1">Sunny</option>
-<option value="2">Cloudy</option>
-<option value="3">Office</option>
-<option value="4">Home</option>
-</select>
 </div>
 
 <div class="control">
@@ -325,8 +338,10 @@ onchange="control('sharpness',this.value)">
 </div>
 </div>
 
+
 <div class="card">
-<h2>Advanced Camera</h2>
+
+<h2>Advanced</h2>
 
 <div class="controls">
 
@@ -334,12 +349,6 @@ onchange="control('sharpness',this.value)">
 <label>AE Level</label>
 <input type="range" min="-2" max="2" value="0"
 onchange="control('ae_level',this.value)">
-</div>
-
-<div class="control">
-<label>Gain Ceiling</label>
-<input type="range" min="0" max="6" value="0"
-onchange="control('gainceiling',this.value)">
 </div>
 
 <div class="control">
@@ -360,76 +369,97 @@ onchange="control('aec_value',this.value)">
 onchange="control('led_intensity',this.value)">
 </div>
 
-<div class="control">
-<label>XCLK</label>
-<input type="number" min="1" max="40" value="20"
-onchange="control('xclk',this.value)">
+</div>
 </div>
 
-</div>
-</div>
 
 <div class="card full">
-<h2>Server / Debug</h2>
+
+<h2>Debug</h2>
+
 <pre id="debug">Waiting...</pre>
+
 </div>
 
 </div>
 </div>
+
 
 <script>
 
-async function control(varName,value){
-  try{
-    const r=await fetch(
-      '/control?var='+encodeURIComponent(varName)+
-      '&val='+encodeURIComponent(value)
-    );
+async function control(variable,value){
 
-    const data=await r.json();
-    log(data);
-  }catch(e){
-    log({error:e.message});
-  }
+try{
+
+const response=await fetch(
+"/control?var="+
+encodeURIComponent(variable)+
+"&val="+
+encodeURIComponent(value)
+);
+
+const data=await response.json();
+
+console.log(data);
+
+}catch(error){
+
+console.error(error);
+
 }
 
-async function capture(){
-  window.open('/capture','_blank');
 }
+
+
+function capture(){
+
+window.open("/capture","_blank");
+
+}
+
 
 async function updateStatus(){
-  try{
-    const r=await fetch('/status');
-    const data=await r.json();
 
-    const online=data.connected;
+try{
 
-    document.getElementById("dot")
-      .className="dot "+(online?"online":"");
+const response=await fetch("/status");
 
-    document.getElementById("connection").innerText =
-      online ? "Camera Online" : "Camera Offline";
+const data=await response.json();
 
-    document.getElementById("camState").innerText =
-      online ? "Online" : "Offline";
+const online=data.connected;
 
-    document.getElementById("viewerCount").innerText =
-      data.viewers || 0;
+document.getElementById("dot").className=
+"dot "+(online?"online":"");
 
-    document.getElementById("frameSize").innerText =
-      data.frameSize ?
-      Math.round(data.frameSize/1024)+" KB" : "0 KB";
+document.getElementById("connection").innerText=
+online?"Camera Online":"Camera Offline";
 
-    document.getElementById("debug").innerText =
-      JSON.stringify(data,null,2);
+document.getElementById("camState").innerText=
+online?"Online":"Offline";
 
-  }catch(e){
-    document.getElementById("connection").innerText =
-      "Server Error";
-  }
+document.getElementById("viewerCount").innerText=
+data.viewers;
+
+document.getElementById("frameSize").innerText=
+data.frameSize
+?Math.round(data.frameSize/1024)+" KB"
+:"0 KB";
+
+document.getElementById("debug").innerText=
+JSON.stringify(data,null,2);
+
+}catch(error){
+
+document.getElementById("connection").innerText=
+"Server Error";
+
 }
 
+}
+
+
 setInterval(updateStatus,1000);
+
 updateStatus();
 
 </script>
@@ -438,488 +468,662 @@ updateStatus();
 </html>`);
 });
 
+
 /* =========================
    STATUS
 ========================= */
 
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    camera: !!cameraSocket,
-    timestamp: Date.now()
-  });
+app.get("/health",(req,res)=>{
+
+res.json({
+ok:true,
+camera:!!cameraSocket,
+timestamp:Date.now()
 });
 
-app.get("/status", (req, res) => {
-  res.json({
-    connected: !!cameraSocket,
-    connectedAt: cameraConnectedAt,
-    viewers: viewers.size,
-    frameSize: latestFrame ? latestFrame.length : 0,
-    camera: cameraStatus
-  });
 });
+
+
+app.get("/status",(req,res)=>{
+
+res.json({
+
+connected:!!cameraSocket,
+
+connectedAt:cameraConnectedAt,
+
+viewers:viewers.size,
+
+frameSize:latestFrame
+?latestFrame.length
+:0,
+
+camera:cameraStatus
+
+});
+
+});
+
 
 /* =========================
    MJPEG STREAM
 ========================= */
 
-app.get("/stream", (req, res) => {
+app.get("/stream",(req,res)=>{
 
-  res.writeHead(200, {
-    "Content-Type": "multipart/x-mixed-replace; boundary=frame",
-    "Cache-Control": "no-cache",
-    "Connection": "close",
-    "Pragma": "no-cache"
-  });
+res.writeHead(200,{
 
-  viewers.add(res);
+"Content-Type":
+"multipart/x-mixed-replace; boundary=frame",
 
-  let closed = false;
+"Cache-Control":
+"no-cache,no-store,must-revalidate",
 
-  const sendFrame = () => {
-    if (closed || !latestFrame) return;
+"Pragma":"no-cache",
 
-    try {
-      res.write(
-        "--frame\\r\\n" +
-        "Content-Type: image/jpeg\\r\\n" +
-        "Content-Length: " + latestFrame.length +
-        "\\r\\n\\r\\n"
-      );
+"Connection":"keep-alive",
 
-      res.write(latestFrame);
-      res.write("\\r\\n");
+"Access-Control-Allow-Origin":"*"
 
-    } catch {
-      cleanup();
-    }
-  };
-
-  const timer = setInterval(sendFrame, 100);
-
-  function cleanup(){
-    if(closed) return;
-
-    closed = true;
-    clearInterval(timer);
-    viewers.delete(res);
-
-    try {
-      res.end();
-    } catch {}
-  }
-
-  req.on("close", cleanup);
 });
+
+viewers.add(res);
+
+req.on("close",()=>{
+
+viewers.delete(res);
+
+});
+
+});
+
+
+/* =========================
+   SEND FRAME TO VIEWERS
+========================= */
+
+function broadcastFrame(frame){
+
+for(const viewer of viewers){
+
+try{
+
+viewer.write(
+"--frame\r\n"+
+"Content-Type: image/jpeg\r\n"+
+"Content-Length: "+frame.length+
+"\r\n"+
+"Cache-Control: no-cache\r\n"+
+"\r\n"
+);
+
+viewer.write(frame);
+
+viewer.write("\r\n");
+
+}catch(error){
+
+viewers.delete(viewer);
+
+try{
+viewer.end();
+}catch{}
+
+}
+
+}
+
+}
+
 
 /* =========================
    CAPTURE
 ========================= */
 
-app.get("/capture", (req, res) => {
+app.get("/capture",(req,res)=>{
 
-  if (!latestFrame) {
-    return res.status(503).send("No camera frame available");
-  }
+if(!latestFrame){
 
-  res.set({
-    "Content-Type": "image/jpeg",
-    "Cache-Control": "no-cache"
-  });
+return res
+.status(503)
+.send("No camera frame available");
 
-  res.send(latestFrame);
+}
+
+res.setHeader("Content-Type","image/jpeg");
+
+res.setHeader(
+"Cache-Control",
+"no-cache,no-store,must-revalidate"
+);
+
+res.send(latestFrame);
+
 });
+
 
 /* =========================
    CAMERA CONTROL
 ========================= */
 
-function sendCameraCommand(command) {
+function sendCameraCommand(command){
 
-  if (
-    !cameraSocket ||
-    cameraSocket.readyState !== WebSocket.OPEN
-  ) {
-    return false;
-  }
+if(
+!cameraSocket ||
+cameraSocket.readyState!==WebSocket.OPEN
+){
 
-  cameraSocket.send(JSON.stringify(command));
-  return true;
+return false;
+
 }
 
-app.get("/control", (req, res) => {
+cameraSocket.send(JSON.stringify(command));
 
-  const variable = req.query.var;
-  const value = req.query.val;
+return true;
 
-  if (!variable || value === undefined) {
-    return res.status(400).json({
-      error: "Missing var or val"
-    });
-  }
+}
 
-  const ok = sendCameraCommand({
-    type: "control",
-    var: variable,
-    val: Number(value)
-  });
 
-  res.json({
-    ok,
-    command: {
-      type: "control",
-      var: variable,
-      val: Number(value)
-    }
-  });
+app.get("/control",(req,res)=>{
+
+const variable=req.query.var;
+
+const value=req.query.val;
+
+if(!variable || value===undefined){
+
+return res.status(400).json({
+error:"Missing var or val"
 });
+
+}
+
+const numberValue=Number(value);
+
+const ok=sendCameraCommand({
+
+type:"control",
+
+var:variable,
+
+val:Number.isNaN(numberValue)
+?value
+:numberValue
+
+});
+
+res.json({
+
+ok,
+
+command:{
+type:"control",
+var:variable,
+val:numberValue
+}
+
+});
+
+});
+
 
 /* =========================
    XCLK
 ========================= */
 
-app.get("/xclk", (req, res) => {
+app.get("/xclk",(req,res)=>{
 
-  const value = Number(req.query.xclk ?? req.query.val);
+const value=Number(
+req.query.xclk ??
+req.query.val
+);
 
-  if (!Number.isFinite(value)) {
-    return res.status(400).json({
-      error: "Invalid xclk"
-    });
-  }
+const ok=sendCameraCommand({
 
-  const ok = sendCameraCommand({
-    type: "control",
-    var: "xclk",
-    val: value
-  });
+type:"control",
 
-  res.json({ ok, xclk: value });
+var:"xclk",
+
+val:value
+
 });
+
+res.json({
+ok,
+xclk:value
+});
+
+});
+
 
 /* =========================
    REGISTER
 ========================= */
 
-app.get("/reg", (req, res) => {
+app.get("/reg",(req,res)=>{
 
-  const reg = Number(req.query.reg);
-  const mask = Number(req.query.mask ?? 0xFF);
-  const value = Number(req.query.val);
+const reg=Number(req.query.reg);
 
-  if (!Number.isFinite(reg) || !Number.isFinite(value)) {
-    return res.status(400).json({
-      error: "Invalid register parameters"
-    });
-  }
+const mask=Number(
+req.query.mask ?? 255
+);
 
-  const ok = sendCameraCommand({
-    type: "register",
-    reg,
-    mask,
-    val: value
-  });
+const value=Number(req.query.val);
 
-  res.json({
-    ok,
-    reg,
-    mask,
-    val: value
-  });
+const ok=sendCameraCommand({
+
+type:"register",
+
+reg,
+
+mask,
+
+val:value
+
 });
+
+res.json({
+ok,
+reg,
+mask,
+val:value
+});
+
+});
+
 
 /* =========================
    GET REGISTER
 ========================= */
 
-app.get("/greg", async (req, res) => {
+app.get("/greg",(req,res)=>{
 
-  const reg = Number(req.query.reg);
-  const mask = Number(req.query.mask ?? 0xFF);
+const reg=Number(req.query.reg);
 
-  if (!Number.isFinite(reg)) {
-    return res.status(400).json({
-      error: "Invalid register"
-    });
-  }
+const mask=Number(
+req.query.mask ?? 255
+);
 
-  if (
-    !cameraSocket ||
-    cameraSocket.readyState !== WebSocket.OPEN
-  ) {
-    return res.status(503).json({
-      error: "Camera offline"
-    });
-  }
+if(
+!cameraSocket ||
+cameraSocket.readyState!==WebSocket.OPEN
+){
 
-  const requestId =
-    Date.now().toString(36) +
-    Math.random().toString(36).slice(2);
-
-  const timeout = setTimeout(() => {
-    pendingRegisters.delete(requestId);
-
-    if (!res.headersSent) {
-      res.status(504).json({
-        error: "Camera register timeout"
-      });
-    }
-  }, 5000);
-
-  pendingRegisters.set(requestId, {
-    res,
-    timeout
-  });
-
-  cameraSocket.send(JSON.stringify({
-    type: "get_register",
-    id: requestId,
-    reg,
-    mask
-  }));
+return res.status(503).json({
+error:"Camera offline"
 });
+
+}
+
+const id=
+Date.now().toString(36)+
+Math.random().toString(36).slice(2);
+
+const timeout=setTimeout(()=>{
+
+pendingRegisters.delete(id);
+
+if(!res.headersSent){
+
+res.status(504).json({
+error:"Register timeout"
+});
+
+}
+
+},5000);
+
+pendingRegisters.set(id,{
+res,
+timeout
+});
+
+cameraSocket.send(JSON.stringify({
+
+type:"get_register",
+
+id,
+
+reg,
+
+mask
+
+}));
+
+});
+
 
 /* =========================
    PLL
 ========================= */
 
-app.get("/pll", (req, res) => {
+app.get("/pll",(req,res)=>{
 
-  const values = [
-    "bypass",
-    "mul",
-    "sys",
-    "root",
-    "pre",
-    "seld5",
-    "pclken",
-    "pclk"
-  ];
+const keys=[
+"bypass",
+"mul",
+"sys",
+"root",
+"pre",
+"seld5",
+"pclken",
+"pclk"
+];
 
-  const command = {
-    type: "pll"
-  };
+const command={
+type:"pll"
+};
 
-  for (const key of values) {
-    command[key] = Number(req.query[key] ?? 0);
-  }
+for(const key of keys){
 
-  const ok = sendCameraCommand(command);
+command[key]=Number(
+req.query[key] ?? 0
+);
 
-  res.json({
-    ok,
-    command
-  });
+}
+
+const ok=sendCameraCommand(command);
+
+res.json({
+ok,
+command
 });
 
+});
+
+
 /* =========================
-   RESOLUTION / RAW WINDOW
+   RESOLUTION
 ========================= */
 
-app.get("/resolution", (req, res) => {
+app.get("/resolution",(req,res)=>{
 
-  const values = [
-    "sx",
-    "sy",
-    "ex",
-    "ey",
-    "offx",
-    "offy",
-    "tx",
-    "ty",
-    "ox",
-    "oy",
-    "scale",
-    "binning"
-  ];
+const keys=[
+"sx",
+"sy",
+"ex",
+"ey",
+"offx",
+"offy",
+"tx",
+"ty",
+"ox",
+"oy",
+"scale",
+"binning"
+];
 
-  const command = {
-    type: "resolution"
-  };
+const command={
+type:"resolution"
+};
 
-  for (const key of values) {
-    command[key] = Number(req.query[key] ?? 0);
-  }
+for(const key of keys){
 
-  const ok = sendCameraCommand(command);
+command[key]=Number(
+req.query[key] ?? 0
+);
 
-  res.json({
-    ok,
-    command
-  });
+}
+
+const ok=sendCameraCommand(command);
+
+res.json({
+ok,
+command
 });
 
+});
+
+
 /* =========================
-   JSON COMMAND
+   POST COMMAND
 ========================= */
 
 app.use(express.json());
 
-app.post("/command", (req, res) => {
+app.post("/command",(req,res)=>{
 
-  if (!req.body || typeof req.body !== "object") {
-    return res.status(400).json({
-      error: "Invalid JSON"
-    });
-  }
+const ok=sendCameraCommand(req.body);
 
-  const ok = sendCameraCommand(req.body);
-
-  res.json({
-    ok,
-    command: req.body
-  });
+res.json({
+ok,
+command:req.body
 });
+
+});
+
 
 /* =========================
-   WEBSOCKET
+   WEBSOCKET UPGRADE
 ========================= */
 
-const pendingRegisters = new Map();
+server.on("upgrade",(request,socket,head)=>{
 
-server.on("upgrade", (request, socket, head) => {
+const url=new URL(
+request.url,
+"http://localhost"
+);
 
-  const url = new URL(
-    request.url,
-    `http://${request.headers.host}`
-  );
+if(url.pathname!=="/ws"){
 
-  if (url.pathname !== "/ws") {
-    socket.destroy();
-    return;
-  }
+socket.destroy();
 
-  wss.handleUpgrade(request, socket, head, ws => {
+return;
 
-    const role = url.searchParams.get("role") || "viewer";
+}
 
-    wss.emit("connection", ws, request, role);
-  });
+const role=
+url.searchParams.get("role")
+||"viewer";
+
+wss.handleUpgrade(
+request,
+socket,
+head,
+ws=>{
+
+wss.emit(
+"connection",
+ws,
+request,
+role
+);
+
 });
 
-wss.on("connection", (ws, request, role) => {
-
-  console.log("WebSocket connected:", role);
-
-  if (role === "camera") {
-
-    if (cameraSocket &&
-        cameraSocket.readyState === WebSocket.OPEN) {
-      cameraSocket.close();
-    }
-
-    cameraSocket = ws;
-    cameraConnectedAt = Date.now();
-
-    sendCameraCommand({
-      type: "server",
-      message: "camera_connected"
-    });
-
-    ws.on("message", data => {
-
-      if (Buffer.isBuffer(data)) {
-
-        latestFrame = Buffer.from(data);
-
-        for (const viewer of viewers) {
-          try {
-            viewer.write(
-              "--frame\\r\\n" +
-              "Content-Type: image/jpeg\\r\\n" +
-              "Content-Length: " + latestFrame.length +
-              "\\r\\n\\r\\n"
-            );
-
-            viewer.write(latestFrame);
-            viewer.write("\\r\\n");
-
-          } catch {}
-        }
-
-        return;
-      }
-
-      try {
-
-        const msg = JSON.parse(data.toString());
-
-        if (msg.type === "camera_status") {
-          cameraStatus = msg;
-        }
-
-        if (
-          msg.type === "register_result" ||
-          msg.type === "greg_result"
-        ) {
-
-          const id = msg.id;
-
-          if (id && pendingRegisters.has(id)) {
-
-            const pending = pendingRegisters.get(id);
-
-            clearTimeout(pending.timeout);
-            pendingRegisters.delete(id);
-
-            pending.res.json(msg);
-          }
-        }
-
-      } catch (err) {
-        console.log("Invalid camera message");
-      }
-    });
-
-    ws.on("close", () => {
-
-      console.log("Camera disconnected");
-
-      if (cameraSocket === ws) {
-        cameraSocket = null;
-        cameraConnectedAt = null;
-      }
-    });
-
-    ws.on("error", err => {
-      console.log("Camera WebSocket error:", err.message);
-    });
-
-    return;
-  }
-
-  /* Viewer WebSocket */
-
-  viewers.add(ws);
-
-  ws.send(JSON.stringify({
-    type: "server",
-    message: "viewer_connected"
-  }));
-
-  ws.on("close", () => {
-    viewers.delete(ws);
-  });
-
-  ws.on("error", () => {
-    viewers.delete(ws);
-  });
 });
+
+
+/* =========================
+   WEBSOCKET CONNECTION
+========================= */
+
+wss.on("connection",(ws,request,role)=>{
+
+console.log(
+"WebSocket connected:",
+role
+);
+
+
+/* CAMERA */
+
+if(role==="camera"){
+
+if(
+cameraSocket &&
+cameraSocket.readyState===WebSocket.OPEN
+){
+
+cameraSocket.close();
+
+}
+
+cameraSocket=ws;
+
+cameraConnectedAt=Date.now();
+
+ws.send(JSON.stringify({
+
+type:"server",
+
+message:"camera_connected"
+
+}));
+
+
+ws.on("message",(data)=>{
+
+/* BINARY JPEG */
+
+if(Buffer.isBuffer(data)){
+
+latestFrame=Buffer.from(data);
+
+broadcastFrame(latestFrame);
+
+return;
+
+}
+
+
+/* JSON */
+
+try{
+
+const message=
+JSON.parse(data.toString());
+
+console.log(
+"Camera:",
+message.type
+);
+
+
+if(message.type==="camera_status"){
+
+cameraStatus=message;
+
+}
+
+
+if(
+message.type==="register_result" ||
+message.type==="greg_result"
+){
+
+const id=message.id;
+
+if(
+id &&
+pendingRegisters.has(id)
+){
+
+const pending=
+pendingRegisters.get(id);
+
+clearTimeout(
+pending.timeout
+);
+
+pendingRegisters.delete(id);
+
+pending.res.json(message);
+
+}
+
+}
+
+}catch(error){
+
+console.log(
+"Invalid camera JSON"
+);
+
+}
+
+});
+
+
+ws.on("close",()=>{
+
+console.log(
+"Camera disconnected"
+);
+
+if(cameraSocket===ws){
+
+cameraSocket=null;
+
+cameraConnectedAt=null;
+
+}
+
+});
+
+
+ws.on("error",(error)=>{
+
+console.log(
+"Camera error:",
+error.message
+);
+
+});
+
+return;
+
+}
+
+
+/* VIEWER */
+
+ws.send(JSON.stringify({
+
+type:"server",
+
+message:"viewer_connected"
+
+}));
+
+
+ws.on("close",()=>{
+
+console.log(
+"Viewer disconnected"
+);
+
+});
+
+});
+
 
 /* =========================
    SERVER
 ========================= */
 
-server.listen(PORT, "0.0.0.0", () => {
+server.listen(
+PORT,
+"0.0.0.0",
+()=>{
 
-  console.log("================================");
-  console.log(" ESP32-CAM SERVER");
-  console.log("================================");
-  console.log("Port:", PORT);
-  console.log("Web UI: /");
-  console.log("Stream: /stream");
-  console.log("Capture: /capture");
-  console.log("Status: /status");
-  console.log("================================");
+console.log(
+"ESP32-CAM server running"
+);
+
+console.log(
+"Port:",
+PORT
+);
+
+console.log(
+"Stream:",
+"/stream"
+);
+
+console.log(
+"Capture:",
+"/capture"
+);
+
 });
