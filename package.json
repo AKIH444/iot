@@ -1,16 +1,17 @@
 {
-  "name": "esp32-camera-server",
+  "name": "esp32cam-free-relay",
   "version": "1.0.0",
-  "description": "ESP32-CAM WebSocket streaming and camera control server",
+  "private": true,
+  "description": "JPEG relay for ESP32-CAM: HTTP upload -> browser WebSocket",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "express": "^4.21.2",
-    "ws": "^8.18.0"
+    "express": "^5.2.1",
+    "ws": "^8.21.3"
   }
 }
