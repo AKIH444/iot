@@ -1,211 +1,431 @@
+// server.js
+
 const http = require("http");
-const express = require("express");
-const { WebSocketServer, WebSocket } = require("ws");
+const WebSocket = require("ws");
 
-const PORT = Number(process.env.PORT || 8080);
-const CAMERA_TOKEN =
-  process.env.CAMERA_TOKEN || "change-this-secret-token";
+const PORT = process.env.PORT || 8080;
 
-// Keep this comfortably above your expected JPEG size.
-// VGA JPEGs are normally far below this.
-const MAX_FRAME_BYTES = Number(
-  process.env.MAX_FRAME_BYTES || 2 * 1024 * 1024
-);
+const server = http.createServer((req, res) => {
 
-const app = express();
+    // --------------------------------------------------------
+    // CORS
+    // --------------------------------------------------------
 
-// Important when running behind Cloudflare / another reverse proxy.
-app.set("trust proxy", true);
+    res.setHeader(
+        "Access-Control-Allow-Origin",
+        "*"
+    );
 
-// We intentionally parse ONLY image/jpeg as raw binary.
-app.use(
-  "/upload",
-  express.raw({
-    type: "image/jpeg",
-    limit: MAX_FRAME_BYTES,
-  })
-);
+    res.setHeader(
+        "Cache-Control",
+        "no-cache, no-store, must-revalidate"
+    );
 
+
+    // --------------------------------------------------------
+    // STATUS
+    // --------------------------------------------------------
+
+    if (req.url === "/status") {
+
+        const uptime = process.uptime();
+
+        res.writeHead(
+            200,
+            {
+                "Content-Type":
+                    "application/json"
+            }
+        );
+
+        res.end(
+            JSON.stringify({
+                online: true,
+                cameraConnected:
+                    cameraSocket !== null,
+                uptime: uptime,
+                frames: framesReceived,
+                fps: currentFPS
+            })
+        );
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // MJPEG STREAM
+    // --------------------------------------------------------
+
+    if (req.url === "/stream") {
+
+        res.writeHead(
+            200,
+            {
+                "Content-Type":
+                    "multipart/x-mixed-replace; boundary=frame",
+
+                "Cache-Control":
+                    "no-cache, no-store, must-revalidate",
+
+                "Pragma":
+                    "no-cache",
+
+                "Access-Control-Allow-Origin":
+                    "*",
+
+                "Connection":
+                    "keep-alive"
+            }
+        );
+
+
+        streamClients.add(res);
+
+
+        req.on(
+            "close",
+            () => {
+
+                streamClients.delete(res);
+
+            }
+        );
+
+
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // HOME
+    // --------------------------------------------------------
+
+    if (
+        req.url === "/" ||
+        req.url === "/index.html"
+    ) {
+
+        res.writeHead(
+            200,
+            {
+                "Content-Type":
+                    "text/html"
+            }
+        );
+
+        res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>ESP32-CAM</title>
+
+<style>
+
+body {
+    margin: 0;
+    background: #111;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+}
+
+h1 {
+    margin: 20px;
+}
+
+img {
+    max-width: 95vw;
+    max-height: 85vh;
+    object-fit: contain;
+}
+
+</style>
+
+</head>
+
+<body>
+
+<h1>ESP32-CAM Live</h1>
+
+<img src="/stream">
+
+</body>
+</html>
+        `);
+
+        return;
+    }
+
+
+    res.writeHead(
+        404,
+        {
+            "Content-Type":
+                "text/plain"
+        }
+    );
+
+    res.end("Not found");
+});
+
+
+// ============================================================
+// WEBSOCKET SERVER
+// ============================================================
+
+const wss = new WebSocket.Server({
+    server: server
+});
+
+
+// Current ESP32 connection
+let cameraSocket = null;
+
+
+// Latest JPEG frame
 let latestFrame = null;
-let latestFrameAt = 0;
-let latestCameraId = null;
 
+
+// Connected browser clients
+const streamClients = new Set();
+
+
+// Statistics
 let framesReceived = 0;
-let bytesReceived = 0;
 
-const viewerClients = new Set();
+let currentFPS = 0;
 
-function setCors(res) {
-  // Lets a Firebase-hosted dashboard call /status.
-  // For production, replace "*" with your exact Firebase domain.
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Cache-Control", "no-store");
-}
+let fpsCounter = 0;
 
-app.get("/", (req, res) => {
-  setCors(res);
-  res.json({
-    ok: true,
-    service: "esp32cam-relay",
-    websocket: "/ws",
-    upload: "/upload",
-    status: "/status",
-    snapshot: "/snapshot.jpg",
-  });
-});
+let fpsStart = Date.now();
 
-app.get("/health", (req, res) => {
-  setCors(res);
-  res.json({ ok: true });
-});
 
-app.get("/status", (req, res) => {
-  setCors(res);
+// ============================================================
+// WEBSOCKET CONNECTION
+// ============================================================
 
-  const ageMs =
-    latestFrameAt === 0 ? null : Date.now() - latestFrameAt;
+wss.on(
+    "connection",
+    (ws, req) => {
 
-  res.json({
-    ok: true,
-    camera_online: ageMs !== null && ageMs < 5000,
-    camera_id: latestCameraId,
-    last_frame_age_ms: ageMs,
-    frames_received: framesReceived,
-    bytes_received: bytesReceived,
-    viewers: viewerClients.size,
-  });
-});
+        console.log(
+            "WebSocket client connected:",
+            req.socket.remoteAddress
+        );
 
-app.get("/snapshot.jpg", (req, res) => {
-  setCors(res);
 
-  if (!latestFrame) {
-    return res.status(503).json({
-      ok: false,
-      error: "No frame received yet",
-    });
-  }
+        // Only one camera is expected.
+        // If another ESP32 connects,
+        // replace the previous camera.
 
-  res.setHeader("Content-Type", "image/jpeg");
-  res.setHeader("Content-Length", String(latestFrame.length));
-  res.end(latestFrame);
-});
+        if (cameraSocket !== null) {
 
-app.post("/upload", (req, res) => {
-  const token = req.get("X-Camera-Token") || "";
-  const cameraId = req.get("X-Camera-Id") || "unknown";
+            try {
+                cameraSocket.close();
+            } catch (e) {}
 
-  if (token !== CAMERA_TOKEN) {
-    return res.status(401).json({
-      ok: false,
-      error: "Invalid camera token",
-    });
-  }
+        }
 
-  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-    return res.status(400).json({
-      ok: false,
-      error: "Expected a non-empty image/jpeg body",
-    });
-  }
 
-  // Very small sanity check for JPEG SOI marker: FF D8
-  if (req.body.length < 2 || req.body[0] !== 0xff || req.body[1] !== 0xd8) {
-    return res.status(415).json({
-      ok: false,
-      error: "Body does not look like a JPEG",
-    });
-  }
+        cameraSocket = ws;
 
-  latestFrame = Buffer.from(req.body);
-  latestFrameAt = Date.now();
-  latestCameraId = cameraId;
 
-  framesReceived++;
-  bytesReceived += latestFrame.length;
+        ws.on(
+            "message",
+            (data, isBinary) => {
 
-  // Broadcast the JPEG as ONE binary WebSocket message.
-  for (const client of viewerClients) {
-    if (client.readyState === WebSocket.OPEN) {
-      // Drop this viewer's frame if its socket is already heavily backed up.
-      // This prevents a slow browser from growing server memory indefinitely.
-      if (client.bufferedAmount < MAX_FRAME_BYTES * 2) {
-        client.send(latestFrame, { binary: true });
-      }
+                if (!isBinary) {
+
+                    console.log(
+                        "Camera message:",
+                        data.toString()
+                    );
+
+                    return;
+                }
+
+
+                const frame =
+                    Buffer.from(data);
+
+
+                if (
+                    frame.length === 0
+                ) {
+
+                    return;
+                }
+
+
+                latestFrame = frame;
+
+
+                framesReceived++;
+
+                fpsCounter++;
+
+
+                // ------------------------------------------------
+                // FPS calculation
+                // ------------------------------------------------
+
+                const now = Date.now();
+
+                const elapsed =
+                    now - fpsStart;
+
+
+                if (
+                    elapsed >= 1000
+                ) {
+
+                    currentFPS =
+                        fpsCounter /
+                        (elapsed / 1000);
+
+                    fpsCounter = 0;
+
+                    fpsStart = now;
+
+
+                    console.log(
+                        "FPS:",
+                        currentFPS.toFixed(1),
+                        "Frame:",
+                        frame.length,
+                        "bytes",
+                        "Viewers:",
+                        streamClients.size
+                    );
+                }
+
+
+                // ------------------------------------------------
+                // Send JPEG to all browser clients
+                // ------------------------------------------------
+
+                for (
+                    const client
+                    of streamClients
+                ) {
+
+                    if (
+                        client.destroyed
+                    ) {
+
+                        streamClients.delete(
+                            client
+                        );
+
+                        continue;
+                    }
+
+
+                    try {
+
+                        client.write(
+                            "--frame\r\n" +
+                            "Content-Type: image/jpeg\r\n" +
+                            "Content-Length: " +
+                            frame.length +
+                            "\r\n\r\n"
+                        );
+
+
+                        client.write(
+                            frame
+                        );
+
+
+                        client.write(
+                            "\r\n"
+                        );
+
+                    } catch (err) {
+
+                        streamClients.delete(
+                            client
+                        );
+                    }
+                }
+            }
+        );
+
+
+        ws.on(
+            "close",
+            () => {
+
+                console.log(
+                    "WebSocket client disconnected."
+                );
+
+
+                if (
+                    cameraSocket === ws
+                ) {
+
+                    cameraSocket = null;
+                }
+            }
+        );
+
+
+        ws.on(
+            "error",
+            (err) => {
+
+                console.log(
+                    "WebSocket error:",
+                    err.message
+                );
+
+            }
+        );
+
+
+        // Tell ESP32 it is accepted
+        ws.send(
+            "CAMERA_CONNECTED"
+        );
     }
-  }
+);
 
-  // Small response = less work for ESP32.
-  res.status(204).end();
-});
 
-const server = http.createServer(app);
+// ============================================================
+// SERVER
+// ============================================================
 
-const wss = new WebSocketServer({
-  server,
-  path: "/ws",
-  perMessageDeflate: false,
-  maxPayload: MAX_FRAME_BYTES,
-});
+server.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
 
-wss.on("connection", (ws) => {
-  viewerClients.add(ws);
+        console.log(
+            "================================="
+        );
 
-  // Immediately show the newest frame to a newly opened viewer.
-  if (latestFrame && ws.readyState === WebSocket.OPEN) {
-    ws.send(latestFrame, { binary: true });
-  }
+        console.log(
+            "ESP32-CAM Streaming Server"
+        );
 
-  ws.on("close", () => {
-    viewerClients.delete(ws);
-  });
+        console.log(
+            "================================="
+        );
 
-  ws.on("error", (err) => {
-    console.error("WebSocket viewer error:", err.message);
-    viewerClients.delete(ws);
-  });
-});
+        console.log(
+            "Port:",
+            PORT
+        );
 
-// Heartbeat: kill dead browser sockets.
-const heartbeat = setInterval(() => {
-  for (const ws of viewerClients) {
-    if (ws.isAlive === false) {
-      viewerClients.delete(ws);
-      ws.terminate();
-      continue;
+        console.log(
+            "Stream: /stream"
+        );
+
+        console.log(
+            "Status: /status"
+        );
     }
-
-    ws.isAlive = false;
-    ws.ping();
-  }
-}, 30000);
-
-wss.on("connection", (ws) => {
-  ws.isAlive = true;
-  ws.on("pong", () => {
-    ws.isAlive = true;
-  });
-});
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`ESP32-CAM relay listening on port ${PORT}`);
-  console.log(`POST JPEG frames to http://<server>:${PORT}/upload`);
-  console.log(`Browser WebSocket: ws://<server>:${PORT}/ws`);
-});
-
-function shutdown() {
-  clearInterval(heartbeat);
-
-  for (const ws of viewerClients) {
-    try {
-      ws.close(1001, "Server shutting down");
-    } catch (_) {}
-  }
-
-  server.close(() => process.exit(0));
-
-  setTimeout(() => process.exit(1), 5000).unref();
-}
-
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+);
