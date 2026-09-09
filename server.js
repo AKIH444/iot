@@ -1,293 +1,211 @@
-const express = require("express");
 const http = require("http");
-const WebSocket = require("ws");
+const express = require("express");
+const { WebSocketServer, WebSocket } = require("ws");
+
+const PORT = Number(process.env.PORT || 8080);
+const CAMERA_TOKEN =
+  process.env.CAMERA_TOKEN || "change-this-secret-token";
+
+// Keep this comfortably above your expected JPEG size.
+// VGA JPEGs are normally far below this.
+const MAX_FRAME_BYTES = Number(
+  process.env.MAX_FRAME_BYTES || 2 * 1024 * 1024
+);
 
 const app = express();
-const server = http.createServer(app);
 
-const PORT = process.env.PORT || 10000;
+// Important when running behind Cloudflare / another reverse proxy.
+app.set("trust proxy", true);
 
-// =====================================================
-// CAMERA STATE
-// =====================================================
+// We intentionally parse ONLY image/jpeg as raw binary.
+app.use(
+  "/upload",
+  express.raw({
+    type: "image/jpeg",
+    limit: MAX_FRAME_BYTES,
+  })
+);
 
-let cameraSocket = null;
 let latestFrame = null;
+let latestFrameAt = 0;
+let latestCameraId = null;
 
-const viewers = new Set();
+let framesReceived = 0;
+let bytesReceived = 0;
 
-// =====================================================
-// BASIC HTTP
-// =====================================================
+const viewerClients = new Set();
 
-app.get("/", (req, res) => {
-    res.send(`
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>ESP32 Camera Server</title>
-        </head>
-
-        <body>
-            <h1>ESP32 Camera Server</h1>
-
-            <p>Server is running.</p>
-
-            <p>
-                Camera stream:
-                <a href="/stream">/stream</a>
-            </p>
-
-            <p>
-                Health:
-                <a href="/health">/health</a>
-            </p>
-        </body>
-        </html>
-    `);
-});
-
-// =====================================================
-// HEALTH CHECK
-// =====================================================
-
-app.get("/health", (req, res) => {
-
-    res.json({
-        status: "ok",
-        cameraConnected:
-            cameraSocket !== null &&
-            cameraSocket.readyState === WebSocket.OPEN,
-        viewers: viewers.size
-    });
-
-});
-
-// =====================================================
-// MJPEG STREAM
-// =====================================================
-
-app.get("/stream", (req, res) => {
-
-    console.log("Viewer connected");
-
-    res.writeHead(200, {
-        "Content-Type":
-            "multipart/x-mixed-replace; boundary=frame",
-
-        "Cache-Control":
-            "no-cache, no-store, must-revalidate",
-
-        "Pragma": "no-cache",
-
-        "Connection": "close",
-
-        "Access-Control-Allow-Origin": "*"
-    });
-
-    viewers.add(res);
-
-    // Send latest frame immediately
-    if (latestFrame) {
-        sendFrame(res, latestFrame);
-    }
-
-    req.on("close", () => {
-
-        console.log("Viewer disconnected");
-
-        viewers.delete(res);
-
-    });
-
-});
-
-// =====================================================
-// SEND JPEG FRAME
-// =====================================================
-
-function sendFrame(res, frame) {
-
-    try {
-
-        res.write(
-            "--frame\r\n" +
-            "Content-Type: image/jpeg\r\n" +
-            "Content-Length: " +
-            frame.length +
-            "\r\n\r\n"
-        );
-
-        res.write(frame);
-
-        res.write("\r\n");
-
-    } catch (error) {
-
-        console.log("Viewer write error");
-
-        viewers.delete(res);
-
-    }
-
+function setCors(res) {
+  // Lets a Firebase-hosted dashboard call /status.
+  // For production, replace "*" with your exact Firebase domain.
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "no-store");
 }
 
-// =====================================================
-// WEBSOCKET SERVER
-// =====================================================
-
-const wss = new WebSocket.Server({
-    server: server,
-    path: "/ws"
+app.get("/", (req, res) => {
+  setCors(res);
+  res.json({
+    ok: true,
+    service: "esp32cam-relay",
+    websocket: "/ws",
+    upload: "/upload",
+    status: "/status",
+    snapshot: "/snapshot.jpg",
+  });
 });
 
-wss.on("connection", (ws, req) => {
+app.get("/health", (req, res) => {
+  setCors(res);
+  res.json({ ok: true });
+});
 
-    console.log("WebSocket connection");
+app.get("/status", (req, res) => {
+  setCors(res);
 
-    // =================================================
-    // NEW CAMERA CONNECTION
-    // =================================================
+  const ageMs =
+    latestFrameAt === 0 ? null : Date.now() - latestFrameAt;
 
-    if (cameraSocket !== null) {
+  res.json({
+    ok: true,
+    camera_online: ageMs !== null && ageMs < 5000,
+    camera_id: latestCameraId,
+    last_frame_age_ms: ageMs,
+    frames_received: framesReceived,
+    bytes_received: bytesReceived,
+    viewers: viewerClients.size,
+  });
+});
 
-        console.log(
-            "Replacing old camera connection"
-        );
+app.get("/snapshot.jpg", (req, res) => {
+  setCors(res);
 
-        try {
+  if (!latestFrame) {
+    return res.status(503).json({
+      ok: false,
+      error: "No frame received yet",
+    });
+  }
 
-            cameraSocket.close(
-                1000,
-                "Replaced by new connection"
-            );
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Content-Length", String(latestFrame.length));
+  res.end(latestFrame);
+});
 
-        } catch (error) {
+app.post("/upload", (req, res) => {
+  const token = req.get("X-Camera-Token") || "";
+  const cameraId = req.get("X-Camera-Id") || "unknown";
 
-            console.log(
-                "Error closing old camera"
-            );
+  if (token !== CAMERA_TOKEN) {
+    return res.status(401).json({
+      ok: false,
+      error: "Invalid camera token",
+    });
+  }
 
-        }
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    return res.status(400).json({
+      ok: false,
+      error: "Expected a non-empty image/jpeg body",
+    });
+  }
 
-        cameraSocket = null;
+  // Very small sanity check for JPEG SOI marker: FF D8
+  if (req.body.length < 2 || req.body[0] !== 0xff || req.body[1] !== 0xd8) {
+    return res.status(415).json({
+      ok: false,
+      error: "Body does not look like a JPEG",
+    });
+  }
+
+  latestFrame = Buffer.from(req.body);
+  latestFrameAt = Date.now();
+  latestCameraId = cameraId;
+
+  framesReceived++;
+  bytesReceived += latestFrame.length;
+
+  // Broadcast the JPEG as ONE binary WebSocket message.
+  for (const client of viewerClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      // Drop this viewer's frame if its socket is already heavily backed up.
+      // This prevents a slow browser from growing server memory indefinitely.
+      if (client.bufferedAmount < MAX_FRAME_BYTES * 2) {
+        client.send(latestFrame, { binary: true });
+      }
+    }
+  }
+
+  // Small response = less work for ESP32.
+  res.status(204).end();
+});
+
+const server = http.createServer(app);
+
+const wss = new WebSocketServer({
+  server,
+  path: "/ws",
+  perMessageDeflate: false,
+  maxPayload: MAX_FRAME_BYTES,
+});
+
+wss.on("connection", (ws) => {
+  viewerClients.add(ws);
+
+  // Immediately show the newest frame to a newly opened viewer.
+  if (latestFrame && ws.readyState === WebSocket.OPEN) {
+    ws.send(latestFrame, { binary: true });
+  }
+
+  ws.on("close", () => {
+    viewerClients.delete(ws);
+  });
+
+  ws.on("error", (err) => {
+    console.error("WebSocket viewer error:", err.message);
+    viewerClients.delete(ws);
+  });
+});
+
+// Heartbeat: kill dead browser sockets.
+const heartbeat = setInterval(() => {
+  for (const ws of viewerClients) {
+    if (ws.isAlive === false) {
+      viewerClients.delete(ws);
+      ws.terminate();
+      continue;
     }
 
-    // New connection becomes camera
-    cameraSocket = ws;
-
-    console.log("ESP32-CAM connected");
-
-    // =================================================
-    // RECEIVE DATA
-    // =================================================
-
-    ws.on("message", (data, isBinary) => {
-
-        if (!isBinary) {
-
-            console.log(
-                "Camera message:",
-                data.toString()
-            );
-
-            return;
-        }
-
-        // ---------------------------------------------
-        // JPEG frame
-        // ---------------------------------------------
-
-        latestFrame = Buffer.from(data);
-
-        // Send to all viewers
-        for (const viewer of viewers) {
-
-            sendFrame(
-                viewer,
-                latestFrame
-            );
-
-        }
-
-    });
-
-    // =================================================
-    // DISCONNECTED
-    // =================================================
-
-    ws.on("close", () => {
-
-        console.log(
-            "ESP32-CAM WebSocket closed"
-        );
-
-        // Only clear cameraSocket if THIS
-        // connection is still the active one.
-
-        if (cameraSocket === ws) {
-
-            cameraSocket = null;
-
-            console.log(
-                "Camera connection cleared"
-            );
-
-        }
-
-    });
-
-    // =================================================
-    // ERROR
-    // =================================================
-
-    ws.on("error", (error) => {
-
-        console.log(
-            "WebSocket error:",
-            error.message
-        );
-
-        if (cameraSocket === ws) {
-
-            cameraSocket = null;
-
-        }
-
-    });
-
-});
-
-// =====================================================
-// WEBSOCKET HEARTBEAT
-// =====================================================
-
-setInterval(() => {
-
-    wss.clients.forEach((ws) => {
-
-        if (ws.readyState === WebSocket.OPEN) {
-
-            ws.ping();
-
-        }
-
-    });
-
+    ws.isAlive = false;
+    ws.ping();
+  }
 }, 30000);
 
-// =====================================================
-// START SERVER
-// =====================================================
+wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
+});
 
-server.listen(
-    PORT,
-    "0.0.0.0",
-    () => {
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`ESP32-CAM relay listening on port ${PORT}`);
+  console.log(`POST JPEG frames to http://<server>:${PORT}/upload`);
+  console.log(`Browser WebSocket: ws://<server>:${PORT}/ws`);
+});
 
-        console.log(
-            `Server running on port ${PORT}`
-        );
+function shutdown() {
+  clearInterval(heartbeat);
 
-    }
-);
+  for (const ws of viewerClients) {
+    try {
+      ws.close(1001, "Server shutting down");
+    } catch (_) {}
+  }
+
+  server.close(() => process.exit(0));
+
+  setTimeout(() => process.exit(1), 5000).unref();
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
