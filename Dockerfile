@@ -1,15 +1,15 @@
-FROM node:22-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package*.json ./
+
 RUN npm install --omit=dev
 
 COPY server.js ./
 
 ENV NODE_ENV=production
-ENV PORT=8080
 
-EXPOSE 8080
+EXPOSE 10000
 
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
